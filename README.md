@@ -15,9 +15,11 @@ Some settings belong to the PC rather than the account, like your mic or headset
 
 ## Use it
 
-1. Install [Python 3.10+](https://www.python.org/downloads/) and tick "Add to PATH".
+1. Download `valset.exe` from the [latest release](https://github.com/yksaionara/valset/releases) and put it in its own folder, because your saves go in a `profiles` folder next to it.
 2. Open the Riot Client and log in.
-3. Double-click `valset.bat`.
+3. Double-click `valset.exe`.
+
+Windows SmartScreen may warn you because the exe isn't signed. Click **More info**, then **Run anyway**. If you'd rather run from source, install [Python 3.10+](https://www.python.org/downloads/) and double-click `valset.bat`.
 
 ```
   1  Save my settings
@@ -34,6 +36,8 @@ The top of the menu shows the account you're logged in as, and it updates by its
 
 ## Commands
 
+Use `valset.exe` instead of `python valset.py` if you have the exe.
+
 ```
 python valset.py status
 python valset.py save "main"
@@ -49,5 +53,5 @@ python valset.py import main.zip
 
 - Your saves stay on your PC in the `profiles` folder next to the script. Nothing gets uploaded anywhere apart from your own Riot settings.
 - valset never asks for your password. It uses the login the Riot Client already has.
-- It's Windows only and needs nothing beyond Python's standard library.
+- It's Windows only. The source needs nothing beyond Python's standard library.
 - This is a fan project and isn't made or endorsed by Riot Games. Use it at your own risk.

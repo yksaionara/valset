@@ -40,7 +40,8 @@ from pathlib import Path
 
 # --------------------------------------------------------------------------- paths & constants
 
-APP_DIR = Path(__file__).resolve().parent
+# as an exe, keep saves next to valset.exe (not in PyInstaller's temp folder)
+APP_DIR = Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent
 PROFILES = APP_DIR / "profiles"
 LOCALAPPDATA = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData/Local")))
 LOCKFILE = LOCALAPPDATA / "Riot Games" / "Riot Client" / "Config" / "lockfile"
@@ -1198,7 +1199,16 @@ def command_shell(parser):
 def main():
     parser = build_parser()
     if len(sys.argv) == 1:
-        menu(parser)
+        try:
+            menu(parser)
+        except KeyboardInterrupt:
+            pass
+        except Exception:
+            # double-clicked exe: keep the window open so the error can be read
+            import traceback
+            traceback.print_exc()
+            input("\nSomething went wrong. Press Enter to close...")
+            return 1
         return 0
     return run(parser, sys.argv[1:])
 
