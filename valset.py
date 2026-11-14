@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ctypes
 import json
 import os
 import re
@@ -29,14 +30,22 @@ import ssl
 import stat
 import subprocess
 import sys
+import threading
 import time
+import http.client as _hc  # aliased: this file has its own http() function
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 import zlib
+from ctypes import wintypes
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+
+# Run as a script this module is __main__; make `import valset` (in app, tracker, tui, updater)
+# return this same module, not a second copy whose AppError is a different class.
+sys.modules.setdefault("valset", sys.modules[__name__])
 
 # --------------------------------------------------------------------------- paths & constants
 
@@ -49,8 +58,9 @@ VAL_CONFIG = LOCALAPPDATA / "VALORANT" / "Saved" / "Config"
 VAL_LOG = LOCALAPPDATA / "VALORANT" / "Saved" / "Logs" / "ShooterGame.log"
 GAME_EXE = "VALORANT-Win64-Shipping.exe"
 
+VERSION = "0.2.0-beta"  # must match the GitHub release tag (v0.2.0-beta); the updater compares against it
 SETTINGS_TYPE = "Ares.PlayerSettings"
-USER_AGENT = "valset/1.0"  # honest app name; Python's default UA is blocked by Cloudflare
+USER_AGENT = f"valset/{VERSION}"  # honest app name; Python's default UA is blocked by Cloudflare
 # base64 of {"platformType":"PC","platformOS":"Windows",...} exactly as the game sends it
 PLATFORM = ("ew0KCSJwbGF0Zm9ybVR5cGUiOiAiUEMiLA0KCSJwbGF0Zm9ybU9TIjogIldpbmRvd3MiLA0KCSJwbGF0Zm9ybU9TVmVyc2lvbiI6"
             "ICIxMC4wLjE5MDQyLjEuMjU2LjY0Yml0IiwNCgkicGxhdGZvcm1DaGlwc2V0IjogIlVua25vd24iDQp9")
@@ -112,24 +122,61 @@ class HttpError(AppError):
 
 # --------------------------------------------------------------------------- HTTP
 
-def http(method, url, headers=None, body=None, local=False, raw_text=False):
+_SSL = {}
+_conns = threading.local()  # per thread: (host, port, local) -> open keep-alive connection
+
+
+def _ssl_context(local):
+    """Built once: creating a context loads the whole Windows certificate store."""
+    if local not in _SSL:
+        ctx = ssl.create_default_context()
+        if local:  # Riot Client uses a self-signed cert on 127.0.0.1 only
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        _SSL[local] = ctx
+    return _SSL[local]
+
+
+def http(method, url, headers=None, body=None, local=False, raw_text=False, _redirects=2):
+    """Small JSON-over-HTTPS client. Connections are kept open and reused per host, so
+    repeated calls skip the TCP + TLS handshake (much faster, much less CPU)."""
+    u = urllib.parse.urlsplit(url)
+    host, port = u.hostname, u.port or (443 if u.scheme == "https" else 80)
+    path = (u.path or "/") + (f"?{u.query}" if u.query else "")
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method,
-                                 headers={"User-Agent": USER_AGENT, **(headers or {})})
+    hdrs = {"User-Agent": USER_AGENT, "Connection": "keep-alive", **(headers or {})}
     if data is not None:
-        req.add_header("Content-Type", "application/json")
-    ctx = ssl.create_default_context()
-    if local:  # Riot Client uses a self-signed cert on 127.0.0.1 only
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-    try:
-        with urllib.request.urlopen(req, context=ctx, timeout=15) as resp:
+        hdrs["Content-Type"] = "application/json"
+    pool = getattr(_conns, "pool", None)
+    if pool is None:
+        pool = _conns.pool = {}
+    key = (u.scheme, host, port, local)
+    for attempt in (1, 2):  # a kept-alive connection the server already closed fails once: reconnect
+        conn = pool.get(key)
+        fresh = conn is None
+        if fresh:
+            conn = (_hc.HTTPSConnection(host, port, timeout=15, context=_ssl_context(local))
+                    if u.scheme == "https" else _hc.HTTPConnection(host, port, timeout=15))
+            pool[key] = conn
+        try:
+            conn.request(method, path, body=data, headers=hdrs)
+            resp = conn.getresponse()
             raw = resp.read()
-    except urllib.error.HTTPError as e:
-        detail = e.read()[:300].decode(errors="replace")
-        raise HttpError(f"{method} {url} -> HTTP {e.code} {detail}", e.code) from None
-    except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
-        raise AppError(f"couldn't reach {url}: {getattr(e, 'reason', e)}") from None
+            break
+        except (_hc.HTTPException, OSError) as e:
+            conn.close()
+            pool.pop(key, None)
+            if fresh or attempt == 2:
+                raise AppError(f"couldn't reach {url}: {e}") from None
+    if resp.will_close:
+        conn.close()
+        pool.pop(key, None)
+    if resp.status in (301, 302, 303, 307, 308) and resp.getheader("Location") and _redirects:
+        return http(method, urllib.parse.urljoin(url, resp.getheader("Location")), headers, body, local, raw_text,
+                    _redirects - 1)
+    if resp.status >= 400:
+        detail = raw[:300].decode(errors="replace")
+        raise HttpError(f"{method} {url} -> HTTP {resp.status} {detail}", resp.status)
     if raw_text:
         return raw.decode(errors="replace")
     if not raw.strip():
@@ -196,6 +243,10 @@ def get_session():
     try:
         ent = local("/entitlements/v1/token")
     except HttpError:
+        if game_running():
+            raise AppError("VALORANT is open, but the Riot Client lost its sign-in (it does this after "
+                           "running for a long time). Open the Riot Client window and sign in again, "
+                           "or quit it from the tray and reopen it.")
         raise AppError("Riot Client is open but no account is logged in.")
     except AppError:
         raise AppError("Riot Client isn't responding (still starting, or it closed).")
@@ -247,13 +298,62 @@ def client_version():
     return _client_version or "unknown"
 
 
+_game_handle = None
+
+
 def game_running():
+    """Is VALORANT open? Once found, the game's process handle is kept and asked directly
+    (practically free); only while it's closed is the process list walked."""
+    global _game_handle
+    if os.name == "nt":
+        try:
+            k32 = ctypes.windll.kernel32
+            if _game_handle:
+                if k32.WaitForSingleObject(_game_handle, 0) == 0x102:  # WAIT_TIMEOUT: still running
+                    return True
+                k32.CloseHandle(_game_handle)
+                _game_handle = None
+            pid = _process_exists(GAME_EXE)
+            if pid:
+                _game_handle = k32.OpenProcess(0x00100000, False, pid) or None  # SYNCHRONIZE
+            return bool(pid)
+        except Exception:
+            pass
     try:
-        out = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {GAME_EXE}", "/NH"],
+        out = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {GAME_EXE}", "/NH", "/FO", "CSV"],  # CSV: table mode truncates the name
                              capture_output=True, text=True, timeout=10).stdout
     except Exception:
         return False
     return GAME_EXE.lower() in out.lower()
+
+
+def _process_exists(exe_name):
+    """PID of the first process with this exe name, or 0."""
+
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_void_p), ("th32ModuleID", wintypes.DWORD),
+                    ("cntThreads", wintypes.DWORD), ("th32ParentProcessID", wintypes.DWORD),
+                    ("pcPriClassBase", ctypes.c_long), ("dwFlags", wintypes.DWORD),
+                    ("szExeFile", ctypes.c_wchar * 260)]
+
+    k32 = ctypes.windll.kernel32
+    k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    snap = k32.CreateToolhelp32Snapshot(0x2, 0)  # TH32CS_SNAPPROCESS
+    if snap in (None, wintypes.HANDLE(-1).value):
+        raise OSError("snapshot failed")
+    try:
+        e = PROCESSENTRY32W()
+        e.dwSize = ctypes.sizeof(e)
+        ok_ = k32.Process32FirstW(snap, ctypes.byref(e))
+        target = exe_name.lower()
+        while ok_:
+            if e.szExeFile.lower() == target:
+                return e.th32ProcessID
+            ok_ = k32.Process32NextW(snap, ctypes.byref(e))
+        return 0
+    finally:
+        k32.CloseHandle(snap)
 
 
 # --------------------------------------------------------------------------- cloud settings
@@ -703,22 +803,42 @@ def cmd_restore(a):
         info("Cancelled.")
         return
 
+    r = apply_snapshot(s, snap, cats, getattr(a, "backup_label", None) or "before restore")
+    if r["backup"]:
+        ok(f"Backed up current settings as {r['backup']}")
+        if r["verified"]:
+            ok(f"Settings restored ({', '.join(r['cloud_cats'])}) and verified")
+        else:
+            warn(f"Settings sent ({', '.join(r['cloud_cats'])}) but Riot's copy doesn't fully match. Run 'diff' to check.")
+        info(dim(f"Undo with: restore {r['backup']}"))
+    if r["video_files"]:
+        ok(f"Video settings restored ({r['video_files']} file{'s' if r['video_files'] != 1 else ''})")
+    info("Launch VALORANT and the restored settings load in.")
+
+
+def apply_snapshot(s: Session, snap: Snap, cats, backup_label="before restore"):
+    """Back up the account, then write the chosen parts of `snap` onto it. Shared by the
+    terminal and the window. Returns what happened."""
+    if game_running():
+        raise AppError("Close VALORANT first. It overwrites your settings when it exits.")
+    cloud_cats = [c for c in cats if c != "video"]
+    out = {"backup": None, "verified": None, "cloud_cats": cloud_cats, "video_files": 0}
     if cloud_cats:
-        backup = save_snapshot(s, getattr(a, "backup_label", None) or "before restore", auto=True)
-        ok(f"Backed up current settings as {backup.id}")
+        backup = save_snapshot(s, backup_label, auto=True)
         merged = merge(get_cloud(s), snap.cloud(), set(cloud_cats))
         put_cloud(s, merged)
-        if flatten(get_cloud(s)) == flatten(merged):
-            ok(f"Settings restored ({', '.join(cloud_cats)}) and verified")
-        else:
-            warn(f"Settings sent ({', '.join(cloud_cats)}) but Riot's copy doesn't fully match. Run 'diff' to check.")
-        info(dim(f"Undo with: restore {backup.id}"))
-
+        out["backup"] = backup.id
+        out["verified"] = flatten(get_cloud(s)) == flatten(merged)
     if "video" in cats:
-        n = restore_local_config(snap.video_dir, s.puuid)
-        if n:
-            ok(f"Video settings restored ({n} file{'s' if n != 1 else ''})")
-    info("Launch VALORANT and the restored settings load in.")
+        out["video_files"] = restore_local_config(snap.video_dir, s.puuid)
+    return out
+
+
+def undo_backups(s: Session):
+    """Backups made right before a load, newest first. Each one is used up once undone,
+    so undoing again steps further back instead of redoing the load."""
+    return [x for x in all_snapshots(s.puuid)
+            if x.puuid == s.puuid and x.meta.get("auto") and x.label == "before restore"]
 
 
 def cmd_delete(a):
@@ -812,6 +932,21 @@ def _current_puuid():
         return None
 
 
+def _live(a):
+    import tracker  # imported here: tracker imports from this file
+    tracker.cmd_live(a)
+
+
+def _history(a):
+    import tracker
+    tracker.cmd_history(a)
+
+
+def _update(a):
+    import updater
+    return updater.cmd_update(a)
+
+
 # --------------------------------------------------------------------------- CLI wiring
 
 def build_parser():
@@ -820,6 +955,7 @@ def build_parser():
         description="Save and restore VALORANT settings per Riot account.",
         epilog=f"categories: {', '.join(CATEGORIES)}.  <snap> = number from 'list', snapshot id, or label.",
     )
+    p.add_argument("--version", action="version", version=f"valset {VERSION}")
     sub = p.add_subparsers(dest="cmd", metavar="command")
 
     sub.add_parser("status", help="show Riot Client, logged-in account and game state").set_defaults(fn=cmd_status)
@@ -865,6 +1001,22 @@ def build_parser():
     sp.add_argument("--no-save", action="store_true", help="just report switches")
     sp.add_argument("--interval", type=float, default=5, help="seconds between checks")
     sp.set_defaults(fn=cmd_watch)
+
+    sp = sub.add_parser("live", aliases=["party"], help="live tracker: ranks, peaks, K/D, parties, skins in your match")
+    sp.add_argument("--no-skins", action="store_true", help="hide the skin line under each player")
+    sp.add_argument("--interval", type=float, default=5, help="seconds between refreshes")
+    sp.set_defaults(fn=_live)
+
+    sp = sub.add_parser("history", help="your recent matches with K/D/A, ACS, HS%% and RR")
+    sp.add_argument("count", nargs="?", type=int, default=10, help="how many matches (max 20)")
+    sp.set_defaults(fn=_history)
+
+    sp = sub.add_parser("update", help="check GitHub for a newer valset and install it")
+    sp.add_argument("--check", action="store_true", help="only say whether there's an update")
+    sp.add_argument("-y", "--yes", action="store_true", help="install without asking")
+    sp.set_defaults(fn=_update)
+
+    sub.add_parser("menu", help="the simple numbered menu instead of the full valset screen")
 
     sub.add_parser("open", help="open the snapshots folder in Explorer").set_defaults(fn=cmd_open)
     return p
@@ -1039,8 +1191,7 @@ def menu_view(s):
 def menu_undo(s):
     # Only backups made right before a load count; each one is used up once undone,
     # so pressing Undo again steps further back instead of redoing the load.
-    backups = [x for x in all_snapshots(s.puuid)
-               if x.puuid == s.puuid and x.meta.get("auto") and x.label == "before restore"]
+    backups = undo_backups(s)
     if not backups:
         info("Nothing to undo on this account.")
         return
@@ -1136,6 +1287,9 @@ def menu(parser):
         ("Look at my saves", menu_view, False),
         ("Undo the last load", menu_undo, True),
         ("Delete a save", menu_delete, False),
+        ("Live match tracker", lambda s: _live(None), True),
+        ("My match history", lambda s: _history(None), True),
+        ("Check for updates", lambda s: _update(argparse.Namespace(check=False, yes=False)), False),
         ("Advanced (type commands)", None, False),
     ]
     while True:
@@ -1198,8 +1352,18 @@ def command_shell(parser):
 
 def main():
     parser = build_parser()
-    if len(sys.argv) == 1:
+    if getattr(sys, "frozen", False):  # remove the exe an update left behind
+        import updater
+        threading.Thread(target=updater.cleanup, daemon=True).start()
+    if len(sys.argv) == 1 or sys.argv[1:] == ["menu"]:
         try:
+            if len(sys.argv) == 1 and os.environ.get("VALSET_TERMINAL") != "1":
+                try:
+                    import tui
+                    tui.run()
+                    return 0
+                except AppError as e:
+                    warn(f"{e}  Using the simple menu instead.")
             menu(parser)
         except KeyboardInterrupt:
             pass

@@ -1,0 +1,53 @@
+# Push a tag like v0.2.0-beta and this builds valset.exe + valset-setup.exe and publishes the
+# GitHub release. Every valset copy checks these releases, so publishing one ships an update.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Tag must match VERSION in valset.py
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path valset.py -Pattern '^VERSION = "(.+?)"').Matches[0].Groups[1].Value
+          if ("v$v" -ne "${{ github.ref_name }}") {
+            throw "Tag ${{ github.ref_name }} doesn't match VERSION = `"$v`" in valset.py. Fix one and re-tag."
+          }
+
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+
+      - name: Build exe and setup
+        shell: pwsh
+        run: ./build.ps1
+
+      - name: Source zip
+        shell: pwsh
+        run: Compress-Archive -Path *.py, valset.bat, README.md -DestinationPath "dist/valset-${{ github.ref_name }}-source.zip"
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $opts = @("--title", "valset $tag", "--generate-notes")
+          if ($tag -match "-") { $opts += "--prerelease" }   # v0.2.0-beta -> pre-release
+          gh release create $tag dist/valset-setup.exe dist/valset.exe "dist/valset-$tag-source.zip" @opts
