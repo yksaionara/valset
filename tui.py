@@ -1,5 +1,5 @@
 """valset in the terminal: a full-screen, keyboard-driven view of the live match, your
-matches, settings saves and options.
+settings saves and options. Lists are picked with the arrow keys and Enter.
 
 Cheap by design: the Riot polling runs in app.Live on a background thread. This loop
 sleeps on the console's input handle (no busy polling) and wakes a few times a second
@@ -17,9 +17,8 @@ import unicodedata
 from datetime import datetime
 
 import app
-import tracker
 import updater
-from valset import CATEGORIES, VERSION, AppError
+from valset import VERSION, AppError
 
 # ---------------------------------------------------------------------------- colours
 
@@ -35,7 +34,7 @@ HOTKEYS = [  # presets you can cycle through in Options (Windows virtual-key cod
     {"ctrl": False, "alt": False, "shift": False, "vk": 0x79, "label": "F10"},
     {"ctrl": True, "alt": False, "shift": True, "vk": 0x7B, "label": "Ctrl+Shift+F12"},
 ]
-TABS = [("live", "Live"), ("history", "My matches"), ("saves", "Saves"), ("options", "Options")]
+TABS = [("live", "Live match"), ("saves", "Saves"), ("options", "Options")]
 RESET, BOLD = "\x1b[0m", "\x1b[1m"
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
@@ -156,7 +155,8 @@ class Console:
         if msvcrt.kbhit():
             ch = msvcrt.getwch()
             if ch in ("\x00", "\xe0"):
-                return {"H": "up", "P": "down", "I": "pgup", "Q": "pgdn", "G": "home", "O": "end"}.get(msvcrt.getwch())
+                return {"H": "up", "P": "down", "K": "left", "M": "right", "I": "pgup", "Q": "pgdn",
+                        "G": "home", "O": "end", "S": "del"}.get(msvcrt.getwch())
             return ch
         # the input handle also wakes up for mouse/focus events; drop those so we sleep again
         n = ctypes.c_ulong()
@@ -176,16 +176,19 @@ class TUI:
         self.apply_hotkey()
         self.tab = "live"
         self.scroll = {t: 0 for t, _ in TABS}
+        self.sel = {"saves": 0, "options": 0}  # highlighted row on the list screens
+        self.focus_line = None  # body line of the highlighted row, so scrolling follows it
         self.msg, self.msg_until, self.msg_kind = "", 0, "info"
-        self.history = None
-        self.history_loading = False
         self.saves = None
+        self.busy = ""  # "Saving...", "Loading..." while a save action runs
         self.tasks = queue.Queue()
-        self.ask = None  # (question, on_key) while waiting for a yes/no key
+        self.dialog = None  # {"lines": fn() -> [str], "on_key": fn(key)} while a question is open
+        self.dialog_v = 0
         self.con = None
         self.update = None  # newer GitHub release, if there is one
         self.update_state, self.update_msg, self.update_pct = "idle", "", 0.0
         self.restart_after = False
+        self.load_saves()
         if self.prefs.get("auto_update", True):
             self.check_update(force=False, quiet=True)
 
@@ -217,6 +220,40 @@ class TUI:
                 self.tasks.put((on_err, None, f"Something went wrong: {e}"))
         threading.Thread(target=work, daemon=True).start()
 
+    def hk_label(self):
+        return self.prefs["hotkey"]["label"] if self.prefs.get("hotkey_enabled") else None
+
+    # ---- dialogs: a short question in the footer, answered with one key
+
+    def open_dialog(self, lines, on_key):
+        self.dialog = {"lines": lines, "on_key": on_key}
+        self.dialog_v += 1
+
+    def close_dialog(self):
+        self.dialog = None
+        self.dialog_v += 1
+
+    def confirm(self, question, fn, detail="", yes="Enter", danger=False):
+        """Yes/no question. `yes` is the key that means yes ("Enter" or "Y"); Esc or any other key cancels."""
+        keys = ("\r", "\n") if yes == "Enter" else ("y", "Y")
+        col = C["accent"] if danger else C["info"]
+
+        def lines():
+            out = [" " + paint(question, C["text"], True)]
+            if detail:
+                out.append(" " + paint(detail, C["muted"]))
+            out.append(" " + paint(f" {yes} ", "#0b0f14", True, col) + paint(" yes     ", C["muted"]) +
+                       paint(" Esc ", C["text"], True, C["head"]) + paint(" no", C["muted"]))
+            return out
+
+        def on_key(ch):
+            self.close_dialog()
+            if ch in keys:
+                fn()
+            else:
+                self.toast("Cancelled.", "info")
+        self.open_dialog(lines, on_key)
+
     # ---- updates
 
     def check_update(self, force=True, quiet=False):
@@ -225,7 +262,7 @@ class TUI:
         def done(rel):
             self.update, self.update_state = rel, "idle"
             if rel:
-                self.toast(f"valset {rel['tag']} is out. Press 4 then U to update.", "info")
+                self.toast(f"valset {rel['tag']} is out. Go to Options (3) to install it.", "info")
             else:
                 self.update_msg = "You have the newest version."
                 if not quiet:
@@ -256,7 +293,7 @@ class TUI:
             self.toast(m, "error")
         self.bg(lambda: updater.install(rel, progress), done, fail)
 
-    def update_key(self):
+    def update_action(self):
         if self.update_state in ("checking", "downloading"):
             return
         if self.update_state == "done":
@@ -266,12 +303,9 @@ class TUI:
             return self.check_update(force=True)
         if updater.install_kind() == "git":
             return self.toast("This folder is a git checkout, so valset won't overwrite it. Run: git pull", "warn")
-        restart = " valset restarts by itself." if updater.install_kind() == "exe" else ""
-        self.confirm(f"Install valset {self.update['tag']}?{restart}  Y = update, any other key = not now",
-                     self.install_update)
-
-    def hk_label(self):
-        return self.prefs["hotkey"]["label"] if self.prefs.get("hotkey_enabled") else None
+        restart = "valset restarts by itself when it's done." if updater.install_kind() == "exe" else \
+            "Close and reopen valset afterwards."
+        self.confirm(f"Install valset {self.update['tag']}?", self.install_update, detail=restart)
 
     # ---- frame
 
@@ -283,7 +317,7 @@ class TUI:
             paint("● connecting...", C["muted"]) if st["riot"] == "starting" else paint("● Riot Client not connected", C["bad"])
         game = paint("● VALORANT " + ("open" if st["game_open"] else "closed"), C["good"] if st["game_open"] else C["muted"])
         phase = ("   " + paint("● " + ("Agent select" if b["phase"] == "agent select" else "In a match"), C["warn"], True)) if b else ""
-        upd = ("   " + paint(f"⬆ {self.update['tag']} out · 4 › U", C["info"], True)) \
+        upd = ("   " + paint(f"⬆ {self.update['tag']} out (Options)", C["info"], True)) \
             if self.update and self.update_state != "done" else ""
         top.append(" " + paint("val", C["text"], True) + paint("set", C["accent"], True) + "   " + acc + "   " + game + phase + upd)
         tabs = []
@@ -295,39 +329,50 @@ class TUI:
         top.append(" " + " ".join(tabs))
         top.append(paint("─" * (w - 1), C["line"]))
 
-        body = {"live": self.live_lines, "history": self.history_lines, "saves": self.saves_lines,
-                "options": self.options_lines}[self.tab](w)
+        self.focus_line = None
+        body = {"live": self.live_lines, "saves": self.saves_lines, "options": self.options_lines}[self.tab](w)
 
         foot = [paint("─" * (w - 1), C["line"])]
-        if self.ask:
-            foot.append(" " + paint(self.ask[0], C["warn"], True))
+        if self.dialog:
+            foot[0] = paint("─" * (w - 1), C["warn"])
+            foot += self.dialog["lines"]()
+        elif self.busy:
+            foot.append(" " + paint(self.busy, C["info"], True))
         elif self.msg and time.time() < self.msg_until:
             col = {"ok": C["good"], "error": C["bad"], "warn": C["warn"]}.get(self.msg_kind, C["info"])
             foot.append(" " + paint(self.msg, col, True))
         else:
             foot.append(" " + self.keys_hint())
-        room = h - len(top) - len(foot)
+        room = max(1, h - len(top) - len(foot))
         max_scroll = max(0, len(body) - room)
-        self.scroll[self.tab] = min(self.scroll[self.tab], max_scroll)
         off = self.scroll[self.tab]
+        if self.focus_line is not None:  # keep the highlighted row on screen
+            if self.focus_line < off + 1:
+                off = self.focus_line - 1
+            elif self.focus_line >= off + room - 1:
+                off = self.focus_line - room + 2
+        off = self.scroll[self.tab] = max(0, min(off, max_scroll))
         view = body[off:off + room]
         if max_scroll:
-            more = f" ↑↓ scroll  {off + 1}-{off + len(view)} of {len(body)} "
+            more = f" {off + 1}-{off + len(view)} of {len(body)} lines "
             foot[0] = paint("─" * (w - 2 - len(more)), C["line"]) + paint(more, C["muted"])
         return top + view + [""] * (room - len(view)) + foot
 
     def keys_hint(self):
-        k = lambda key, label: paint(f"[{key}]", C["accent"], True) + paint(f" {label}  ", C["muted"])
-        common = k("1-4", "section") + k("Q", "quit")
+        k = lambda key, label: paint(f" {key} ", C["text"], True, C["head"]) + paint(f" {label}   ", C["muted"])
+        common = k("1 2 3", "screens") + k("Q", "quit")
         if self.tab == "live":
             b = self.live.board
-            return (k("D", "dodge") if b and b["can_dodge"] else "") + common
-        if self.tab == "history":
-            return k("R", "refresh") + common
+            return (k("D", "dodge") if b and b["can_dodge"] else "") + (k("↑↓", "scroll") if b else "") + common
         if self.tab == "saves":
-            return k("S", "save") + k("L", "load") + k("U", "undo") + k("X", "delete") + common
-        return (k("H", "hotkey on/off") + k("K", "change hotkey") + k("S", "skins") + k("C", "compact")
-                + k("U", "update" if self.update else "check updates") + k("A", "auto-check") + common)
+            row = self.save_rows()[self.sel["saves"]] if self.saves else None
+            if row is None or row.get("new"):
+                return k("↑↓", "pick") + k("Enter", "save my settings") + common
+            out = k("↑↓", "pick") + k("Enter", "load") + k("Del", "delete")
+            if self.saves.get("can_undo"):
+                out += k("U", "undo last load")
+            return out + common
+        return k("↑↓", "pick") + k("Enter", "change") + common
 
     # ---- live
 
@@ -417,240 +462,280 @@ class TUI:
             lines.append(f" {stripe}" + paint(("   " if narrow else " " * 12) + sk, C["muted"]))
         return lines
 
-    # ---- my matches
-
-    def load_history(self):
-        if self.history_loading:
-            return
-        self.history_loading = True
-
-        def done(d):
-            self.history, self.history_loading = d, False
-
-        def fail(m):
-            self.history, self.history_loading = {"error": m}, False
-        self.bg(lambda: tracker.history_data(self.live.get_api(), 15), done, fail)
-
-    def history_lines(self, w):
-        d = self.history
-        if self.history_loading and not d:
-            return ["", "   " + paint("Loading your matches...", C["muted"])]
-        if not d:
-            return ["", "   " + paint("Press R to load your matches.", C["muted"])]
-        if d.get("error"):
-            return ["", "   " + paint("Couldn't load your matches", C["text"], True), "   " + paint(d["error"], C["muted"])]
-        ms = d["matches"]
-        wins, losses = sum(m["result"] == "win" for m in ms), sum(m["result"] == "loss" for m in ms)
-        k, dth = sum(m["k"] for m in ms), sum(m["d"] for m in ms)
-        hs = [m["hs"] for m in ms if m["hs"] is not None]
-        rk, pk = d["rank"], d["peak"]
-        out = ["", " " + paint(d["account"], C["text"], True) + (paint("   (refreshing...)", C["muted"]) if self.history_loading else ""), ""]
-        out.append(" " + (paint(f"{rk['name']} {rk['rr']}rr" if rk["tier"] > 2 else "Unranked", rank_col(rk["tier"]), True) if rk else "?") +
-                   paint("   peak ", C["muted"]) + (paint(pk["name"], rank_col(pk["tier"]), True) if pk else "-") +
-                   paint("   win % this act ", C["muted"]) + paint(f"{d['wr']}%" if d["wr"] is not None else "-", C["text"], True) +
-                   paint(f" ({d['games']} games)", C["muted"]))
-        out.append(" " + paint(f"last {len(ms)} ", C["muted"]) + paint(f"{wins}W {losses}L", C["text"], True) +
-                   paint("   K/D ", C["muted"]) + paint(f"{k / max(dth, 1):.2f}", C["text"], True) +
-                   paint("   HS ", C["muted"]) + paint(f"{round(sum(hs) / len(hs))}%" if hs else "-", C["text"], True))
-        out += ["", paint(f"   {fit('RESULT', 13)}{fit('MAP', 10)}{fit('MODE', 9)}{fit('AGENT', 10)}{fit('K / D / A', 12)}"
-                          f"{'ACS':>4} {'HS%':>4} {'RR':>4}  WHEN", C["muted"])]
-        for m in ms:
-            col = {"win": C["good"], "loss": C["bad"]}.get(m["result"], C["warn"])
-            res = {"win": "WIN", "loss": "LOSS"}.get(m["result"], "DRAW") + (f" {m['score']}" if m["score"] else "")
-            rr = m["rr"]
-            rr_s = paint(f"{('+' if rr > 0 else '') + str(rr):>4}", C["good"] if rr > 0 else C["bad"] if rr < 0 else C["muted"], True) \
-                if rr is not None else paint(f"{'-':>4}", C["muted"])
-            out.append(f" {paint('▌', col)} " + paint(fit(res, 13), col, True) + fit(m["map"], 10) +
-                       paint(fit(m["queue_name"], 9), C["muted"]) + fit(m["agent"], 10) +
-                       paint(fit(f"{m['k']} / {m['d']} / {m['a']}", 12), C["text"], True) +
-                       f"{m['acs'] if m['acs'] is not None else '-':>4} {(str(m['hs']) + '%') if m['hs'] is not None else '-':>4} "
-                       f"{rr_s}  " + paint(ago(m["start"]), C["muted"]))
-        return out
-
-    # ---- saves
+    # ---- saves: a list you move through with ↑↓; Enter saves or loads
 
     def load_saves(self):
         def done(d):
             self.saves = d
+            self.sel["saves"] = min(self.sel["saves"], len(self.save_rows()) - 1)
         self.bg(app.saves_data, done)
 
-    def save_list(self):
+    def save_rows(self):
+        """Selectable rows: 'save my settings' first, then this account's saves, other accounts', backups."""
         d = self.saves or {"saves": []}
         mine = [x for x in d["saves"] if x["mine"] and not x["auto"]]
         other = [x for x in d["saves"] if not x["mine"] and not x["auto"]]
         auto = [x for x in d["saves"] if x["auto"]]
-        return mine, other, auto
+        return [{"new": True}] + mine + other + auto
+
+    def row_line(self, selected, text, w):
+        """A list row; the highlighted one gets a bar and a ▶ marker."""
+        if selected:
+            return paint("▶", C["accent"], True) + paint(" " + text + " " * max(0, w - 3 - vlen(text)), None, False, C["head"])
+        return "  " + text
 
     def saves_lines(self, w):
         d = self.saves
         if not d:
             return ["", "   " + paint("Loading your saves...", C["muted"])]
-        out = ["", " " + paint("Settings saves", C["text"], True) + paint(
-            f"   for {d['account']}" if d["account"] else "   (sign in to the Riot Client to save or load)", C["muted"])]
+        out = [""]
+        if d["account"]:
+            out.append(" " + paint("Your settings saves", C["text"], True) + paint(f"   signed in as {d['account']}", C["muted"]))
+        else:
+            out.append(" " + paint("Sign in to the Riot Client to save or load settings.", C["warn"], True))
         if self.live.status.get("game_open"):
-            out += ["", " " + paint("Close VALORANT before loading a save. The game overwrites your settings when it exits.",
-                                    C["warn"], True)]
-        n = 0
-        for title, items in zip(("THIS ACCOUNT", "OTHER ACCOUNTS", "AUTOMATIC BACKUPS"), self.save_list()):
-            if not items and title != "THIS ACCOUNT":
+            out.append(" " + paint("Close VALORANT before loading. The game overwrites your settings when it closes.", C["warn"]))
+        rows = self.save_rows()
+        sel = self.sel["saves"] = max(0, min(self.sel["saves"], len(rows) - 1))
+        out.append("")
+        if sel == 0:
+            self.focus_line = len(out)
+        out.append(self.row_line(sel == 0, paint("+ Save my current settings", C["good"], True) +
+                                 paint("   sens, keybinds, crosshair, audio, video...", C["muted"]), w))
+        sections = [("THIS ACCOUNT", lambda x: x["mine"] and not x["auto"]),
+                    ("OTHER ACCOUNTS", lambda x: not x["mine"] and not x["auto"]),
+                    ("AUTOMATIC BACKUPS", lambda x: x["auto"])]
+        name_w = max(16, min(34, w - 50))
+        for title, test in sections:
+            items = [(i, x) for i, x in enumerate(rows) if i and test(x)]
+            if not items:
+                if title == "THIS ACCOUNT" and d["account"]:
+                    out += ["", "   " + paint("No saves for this account yet. Press Enter on the line above.", C["muted"])]
                 continue
             out += ["", " " + paint(title, C["muted"], True)]
-            if not items:
-                out.append("   " + paint("No saves for this account yet. Press S to save.", C["muted"]))
-            for x in items:
-                n += 1
+            for i, x in items:
                 when = ""
                 try:
-                    when = datetime.fromisoformat(x["created"]).strftime("%b %d %H:%M")
+                    when = datetime.fromisoformat(x["created"]).strftime("%b %d, %H:%M")
                 except (TypeError, ValueError):
                     pass
-                out.append(f"  {paint(f'{n:>2}', C['accent'], True)}  " + paint(fit(x["label"], 28), C["text"], True) +
-                           paint(fit(f"from {x['account']}", 30) + when + ("  + video" if x["has_video"] else ""), C["muted"]))
-        out += ["", " " + paint("S", C["accent"], True) + paint(" save my settings   ", C["muted"]) +
-                paint("L", C["accent"], True) + paint(" load a save onto this account   ", C["muted"]) +
-                paint("U", C["accent"], True) + paint(" undo the last load" + ("" if d["can_undo"] else " (nothing to undo)") + "   ", C["muted"]) +
-                paint("X", C["accent"], True) + paint(" delete", C["muted"])]
+                extra = "" if x["mine"] else f"from {x['account']}   "
+                text = paint(fit(x["label"], name_w), C["text"], True) + "  " + \
+                    paint(extra + when + ("   + video" if x["has_video"] else ""), C["muted"])
+                if i == sel:
+                    self.focus_line = len(out)
+                out.append(self.row_line(i == sel, text, w))
+        if d.get("can_undo"):
+            out += ["", " " + paint("Loaded the wrong thing? Press U to put this account back how it was.", C["muted"])]
         return out
 
-    def numbered_saves(self):
-        mine, other, auto = self.save_list()
-        return mine + other + auto
+    def saves_key(self, c):
+        d = self.saves
+        if not d or self.busy:
+            return
+        rows = self.save_rows()
+        if c in ("up", "down", "home", "end", "pgup", "pgdn"):
+            step = {"up": -1, "down": 1, "home": -999, "end": 999, "pgup": -10, "pgdn": 10}[c]
+            self.sel["saves"] = max(0, min(len(rows) - 1, self.sel["saves"] + step))
+            return
+        row = rows[self.sel["saves"]]
+        if c in ("\r", "\n", " "):
+            return self.save_new() if row.get("new") else self.load_save(row)
+        if c in ("del", "x", "\x08") and not row.get("new"):
+            return self.confirm(f"Delete \"{row['label']}\"?", lambda: self.run_action("Deleting...", lambda: app.do_delete(row["id"])),
+                                detail="This can't be undone.", yes="Y", danger=True)
+        if c == "u" and d.get("can_undo"):
+            return self.confirm(f"Undo the last load on {d['account']}?",
+                                lambda: self.run_action("Undoing...", app.do_undo),
+                                detail="Puts this account's settings back to how they were before you loaded.")
 
-    # ---- options
+    def run_action(self, busy_text, fn):
+        self.busy = busy_text
+
+        def done(msg):
+            self.busy = ""
+            self.toast(msg, "ok")
+            self.load_saves()
+
+        def fail(m):
+            self.busy = ""
+            self.toast(m, "error")
+            self.load_saves()
+        self.bg(fn, done, fail)
+
+    def save_new(self):
+        d = self.saves
+        if not d["account"]:
+            return self.toast("Sign in to the Riot Client first.", "warn")
+        label = self.line_input(f"Name this save and press Enter (just Enter = \"{d['account']}\", Esc = cancel): ")
+        if label is None:
+            return self.toast("Cancelled.", "info")
+        self.run_action("Saving your settings...", lambda: app.do_save(label))
+
+    def load_save(self, x):
+        d = self.saves
+        if not d["account"]:
+            return self.toast("Sign in to the Riot Client first.", "warn")
+        if self.live.status.get("game_open"):
+            return self.toast("Close VALORANT first. The game overwrites your settings when it closes.", "warn")
+        parts = [c for c, _ in d["parts"]]
+
+        def go(chosen):
+            self.close_dialog()
+            self.run_action("Loading...", lambda: app.do_load(x["id"], chosen))
+
+        def lines():
+            return [" " + paint(f"Load \"{x['label']}\" onto {d['account']}?", C["text"], True),
+                    " " + paint("Loads everything. Your current settings are backed up first, so U can undo it.", C["muted"]),
+                    " " + paint(" Enter ", "#0b0f14", True, C["info"]) + paint(" load     ", C["muted"]) +
+                    paint(" P ", C["text"], True, C["head"]) + paint(" choose parts     ", C["muted"]) +
+                    paint(" Esc ", C["text"], True, C["head"]) + paint(" cancel", C["muted"])]
+
+        def on_key(ch):
+            if ch in ("\r", "\n"):
+                go(parts)
+            elif isinstance(ch, str) and ch.lower() == "p":
+                self.pick_parts(x, go)
+            else:
+                self.close_dialog()
+                self.toast("Cancelled.", "info")
+        self.open_dialog(lines, on_key)
+
+    def pick_parts(self, x, go):
+        names = self.saves["parts"]  # [(category, readable name)]
+        on = {c: True for c, _ in names}
+
+        def lines():
+            boxes = "   ".join(paint(f"{i}", C["accent"], True) + " " +
+                               (paint("■ " + n, C["text"], True) if on[c] else paint("□ " + n, C["muted"]))
+                               for i, (c, n) in enumerate(names, 1))
+            return [" " + paint(f"Which parts of \"{x['label']}\"?", C["text"], True) +
+                    paint("   press a number to tick or untick it", C["muted"]),
+                    " " + boxes,
+                    " " + paint(" Enter ", "#0b0f14", True, C["info"]) + paint(" load the ticked parts     ", C["muted"]) +
+                    paint(" Esc ", C["text"], True, C["head"]) + paint(" cancel", C["muted"])]
+
+        def on_key(ch):
+            if ch in ("\r", "\n"):
+                chosen = [c for c, _ in names if on[c]]
+                if not chosen:
+                    return self.toast("Tick at least one part.", "warn")
+                go(chosen)
+            elif isinstance(ch, str) and ch.isdigit() and 1 <= int(ch) <= len(names):
+                c = names[int(ch) - 1][0]
+                on[c] = not on[c]
+                self.dialog_v += 1
+            elif ch == "\x1b":
+                self.close_dialog()
+                self.toast("Cancelled.", "info")
+        self.open_dialog(lines, on_key)
+
+    # ---- options: same list style, Enter changes the highlighted setting
+
+    def option_rows(self):
+        p = self.prefs
+        hk = p["hotkey"]["label"]
+        if self.update_state == "checking":
+            upd = paint("checking GitHub...", C["muted"])
+        elif self.update_state == "downloading":
+            n = int(self.update_pct * 20)
+            upd = paint("█" * n, C["info"]) + paint("░" * (20 - n), C["line"]) + paint(f" {self.update_pct * 100:3.0f}%", C["muted"])
+        elif self.update_state == "done":
+            upd = paint(self.update_msg, C["good"], True)
+        elif self.update:
+            upd = paint(f"{self.update['tag']} is out", C["info"], True)
+        else:
+            upd = paint(self.update_msg or f"you have v{VERSION}", C["muted"])
+        return [
+            ("Compact board", p.get("compact"), "one line per player",
+             lambda: self.set_pref("compact", not p.get("compact"))),
+            ("Show skins", p.get("show_skins"), "Vandal, Phantom and knife under each player (when compact is off)",
+             lambda: self.set_pref("show_skins", not p.get("show_skins"))),
+            ("Dodge hotkey", p.get("hotkey_enabled"), f"press {hk} twice in agent select to dodge, even in game",
+             lambda: self.set_pref("hotkey_enabled", not p.get("hotkey_enabled"))),
+            ("Hotkey key", hk, "Enter switches to the next key (" + ", ".join(h["label"] for h in HOTKEYS) + ")",
+             self.next_hotkey),
+            ("Check for updates", p.get("auto_update", True), "when valset starts, at most every 6 hours",
+             lambda: self.set_pref("auto_update", not p.get("auto_update", True))),
+            ("Install update" if self.update else "Check now", upd, "", self.update_action),
+        ]
+
+    def next_hotkey(self):
+        labels = [h["label"] for h in HOTKEYS]
+        cur = labels.index(self.prefs["hotkey"]["label"]) if self.prefs["hotkey"]["label"] in labels else -1
+        self.set_pref("hotkey", HOTKEYS[(cur + 1) % len(HOTKEYS)])
+        if not self.hotkey.error:
+            self.toast(f"Dodge hotkey is now {self.prefs['hotkey']['label']}.", "ok")
 
     def options_lines(self, w):
-        p = self.prefs
-        on = lambda v: paint(" ON  ", "#04130b", True, C["good"]) if v else paint(" OFF ", C["muted"], True, C["head"])
-        k = lambda key: paint(f"[{key}]", C["accent"], True)
+        rows = self.option_rows()
+        sel = self.sel["options"] = max(0, min(self.sel["options"], len(rows) - 1))
         out = ["", " " + paint("Options", C["text"], True), ""]
-        out.append(f"  {k('H')} Dodge hotkey        {on(p.get('hotkey_enabled'))}   " + paint(p["hotkey"]["label"], C["text"], True))
-        out.append("      " + paint("Works from inside the game. Press it twice within 3 seconds in agent select to dodge.", C["muted"]))
-        out.append("      " + paint("The first press beeps, so one slip can't dodge you.", C["muted"]))
-        if self.hotkey.error:
-            out.append("      " + paint(self.hotkey.error, C["bad"], True))
-        out.append(f"  {k('K')} Change hotkey       " + paint(" → ".join(h["label"] for h in HOTKEYS), C["muted"]))
-        out.append("")
-        out.append(f"  {k('S')} Show skins          {on(p.get('show_skins'))}   " + paint("Vandal, Phantom and knife under each player", C["muted"]))
-        out.append(f"  {k('C')} Compact             {on(p.get('compact'))}   " + paint("one line per player, no skins", C["muted"]))
-        out += ["", " " + paint("Updates", C["text"], True), ""]
-        where = {"exe": "valset.exe", "git": "git checkout", "source": "Python source"}[updater.install_kind()]
-        out.append("      This copy is " + paint(f"v{VERSION}", C["text"], True) + paint(f"  ({where})", C["muted"]))
-        if self.update_state == "checking":
-            line = paint("Checking GitHub...", C["muted"])
-        elif self.update_state == "downloading":
-            n = int(self.update_pct * 30)
-            line = paint(f"Downloading {self.update['tag']}  ", C["info"], True) + paint("█" * n, C["info"]) + \
-                paint("░" * (30 - n), C["line"]) + paint(f" {self.update_pct * 100:3.0f}%", C["muted"])
-        elif self.update_state == "done":
-            line = paint(self.update_msg, C["good"], True)
-        elif self.update:
-            line = paint(f"{self.update['tag']} is out", C["info"], True) + paint("  press U to install it", C["muted"])
-        else:
-            line = paint(self.update_msg or "Not checked yet.", C["muted"])
-        out.append(f"  {k('U')} {'Update now' if self.update else 'Check now':<20} " + line)
+        for i, (label, value, desc, _) in enumerate(rows):
+            if value is True or value is False:
+                val = paint(" ON  ", "#04130b", True, C["good"]) if value else paint(" OFF ", C["muted"], True, C["line"])
+            elif isinstance(value, str) and ANSI.search(value):
+                val = " " + value
+            else:
+                val = paint(f" {value} ", C["text"], True, C["line"])
+            val += " " * max(0, 16 - vlen(val))  # line the descriptions up
+            text = paint(fit(label, 20), C["text"], True) + val + "  " + paint(desc, C["muted"])
+            if i == sel:
+                self.focus_line = len(out)
+            out.append(self.row_line(i == sel, text, w))
+            if label == "Hotkey key" and self.hotkey.error:
+                out.append("      " + paint(self.hotkey.error, C["bad"], True))
         if self.update and self.update_state == "idle":
-            for note in updater.short_notes(self.update, 5):
-                out.append("        " + paint(fit("· " + note, w - 10), C["muted"]))
-        out.append(f"  {k('A')} Check on start      {on(p.get('auto_update', True))}   " +
-                   paint("asks GitHub at most every 6 hours, never installs until you press U", C["muted"]))
-        out += ["", " " + paint("Text size: ", C["muted"]) + paint("Ctrl + mouse wheel", C["text"], True) +
-                paint(" (or Ctrl + / Ctrl -) in the terminal.", C["muted"]),
-                " " + paint("Second monitor: drag this terminal there. The board fits narrow (portrait) windows too.", C["muted"])]
+            out += ["", " " + paint(f"What's new in {self.update['tag']}", C["muted"], True)]
+            out += ["   " + paint(fit("· " + n, w - 6), C["muted"]) for n in updater.short_notes(self.update, 5)]
+        out += ["", " " + paint("Text too small? ", C["muted"]) + paint("Ctrl + mouse wheel", C["text"], True) +
+                paint(" makes it bigger.", C["muted"]),
+                " " + paint("Second monitor: drag this window there. The board fits narrow windows too.", C["muted"]),
+                " " + paint(f"valset v{VERSION}", C["muted"])]
         return out
 
     # ---- keys
 
     def on_key(self, ch):
-        if self.ask:
-            q, fn = self.ask
-            self.ask = None
-            fn(ch)
+        if self.dialog:
+            self.dialog["on_key"](ch)
             return True
         c = ch.lower() if isinstance(ch, str) and len(ch) == 1 else ch
-        if c in ("q", "\x1b", "\x03"):
+        if c in ("q", "\x03"):
             return False
-        if c in ("1", "2", "3", "4"):
-            self.tab = TABS[int(c) - 1][0]
-            if self.tab == "history" and not self.history:
-                self.load_history()
-            if self.tab == "saves":
-                self.load_saves()
-            return True
-        if c in ("up", "down", "pgup", "pgdn", "home", "end"):
-            h = self.con.dims()[1] - 6
-            delta = {"up": -1, "down": 1, "pgup": -h, "pgdn": h, "home": -10 ** 6, "end": 10 ** 6}[c]
-            self.scroll[self.tab] = max(0, self.scroll[self.tab] + delta)
-            return True
-        if self.tab == "live" and c == "d":
-            b = self.live.board
-            if not b or not b["can_dodge"]:
-                self.toast("You can only dodge during agent select.", "warn")
-            else:
-                self.confirm("Dodge? You lose RR in competitive and get a queue cooldown.  Y = dodge, any other key = stay",
-                             lambda: self.bg(self.live.dodge, None))
-        elif self.tab == "history" and c == "r":
-            self.load_history()
+        tabs = [t for t, _ in TABS]
+        if c in ("1", "2", "3"):
+            return self.go_tab(tabs[int(c) - 1])
+        if c in ("\t", "right", "left"):
+            return self.go_tab(tabs[(tabs.index(self.tab) + (-1 if c == "left" else 1)) % len(tabs)])
+        if self.tab == "live":
+            if c in ("up", "down", "pgup", "pgdn", "home", "end"):
+                h = self.con.dims()[1] - 6
+                delta = {"up": -1, "down": 1, "pgup": -h, "pgdn": h, "home": -10 ** 6, "end": 10 ** 6}[c]
+                self.scroll["live"] = max(0, self.scroll["live"] + delta)
+            elif c == "d":
+                b = self.live.board
+                if not b or not b["can_dodge"]:
+                    self.toast("You can only dodge during agent select.", "warn")
+                else:
+                    self.confirm("Dodge this match?", lambda: self.bg(self.live.dodge, None),
+                                 detail="You lose RR in competitive and get a queue cooldown.", yes="Y", danger=True)
         elif self.tab == "saves":
             self.saves_key(c)
         elif self.tab == "options":
-            if c == "h":
-                self.set_pref("hotkey_enabled", not self.prefs.get("hotkey_enabled"))
-            elif c == "k":
-                labels = [h["label"] for h in HOTKEYS]
-                cur = labels.index(self.prefs["hotkey"]["label"]) if self.prefs["hotkey"]["label"] in labels else -1
-                self.set_pref("hotkey", HOTKEYS[(cur + 1) % len(HOTKEYS)])
-                if not self.hotkey.error:
-                    self.toast(f"Dodge hotkey is now {self.prefs['hotkey']['label']}.", "ok")
-            elif c == "s":
-                self.set_pref("show_skins", not self.prefs.get("show_skins"))
-            elif c == "c":
-                self.set_pref("compact", not self.prefs.get("compact"))
-            elif c == "u":
-                self.update_key()
-            elif c == "a":
-                self.set_pref("auto_update", not self.prefs.get("auto_update", True))
+            rows = self.option_rows()
+            if c in ("up", "down", "home", "end"):
+                step = {"up": -1, "down": 1, "home": -99, "end": 99}[c]
+                self.sel["options"] = max(0, min(len(rows) - 1, self.sel["options"] + step))
+            elif c in ("\r", "\n", " "):
+                rows[self.sel["options"]][3]()
         return True
 
-    def confirm(self, question, fn):
-        self.ask = (question, lambda ch: fn() if isinstance(ch, str) and ch.lower() == "y" else self.toast("Cancelled.", "info"))
-
-    def saves_key(self, c):
-        d = self.saves
-        if not d:
-            return
-        done = lambda msg: (self.toast(msg, "ok"), self.load_saves())
-        if c == "s":
-            if not d["account"]:
-                return self.toast("Sign in to the Riot Client first.", "warn")
-            label = self.line_input(f"Name for this save (Enter = \"{d['account']}\", Esc = cancel): ")
-            if label is not None:
-                self.toast("Saving...", "info")
-                self.bg(lambda: app.do_save(label), done)
-        elif c == "u":
-            if not d["can_undo"]:
-                return self.toast("Nothing to undo on this account.", "info")
-            self.confirm(f"Undo the last load on {d['account']}?  Y = undo, any other key = cancel",
-                         lambda: self.bg(app.do_undo, done))
-        elif c in ("l", "x"):
-            items = self.numbered_saves()
-            if not items:
-                return self.toast("No saves yet.", "info")
-            n = self.line_input(f"{'Load' if c == 'l' else 'Delete'} which save? Type its number (Esc = cancel): ")
-            if not n or not n.isdigit() or not 1 <= int(n) <= len(items):
-                return self.toast("Cancelled." if n is None else "That number isn't in the list.", "info")
-            x = items[int(n) - 1]
-            if c == "x":
-                return self.confirm(f"Delete \"{x['label']}\" for good?  Y = delete, any other key = keep",
-                                    lambda: self.bg(lambda: app.do_delete(x["id"]), done))
-            if self.live.status.get("game_open"):
-                return self.toast("Close VALORANT first. The game overwrites your settings when it exits.", "warn")
-            parts = self.line_input("Load which parts? Enter = everything, or type some of: " + " ".join(CATEGORIES) + "  : ")
-            if parts is None:
-                return self.toast("Cancelled.", "info")
-            chosen = [p for p in parts.lower().split() if p in CATEGORIES] or list(CATEGORIES)
-            self.confirm(f"Load \"{x['label']}\" ({', '.join(chosen)}) onto {d['account']}? Current settings are backed up first.  "
-                         f"Y = load", lambda: (self.toast("Loading...", "info"),
-                                              self.bg(lambda: app.do_load(x["id"], chosen), done)))
+    def go_tab(self, tab):
+        self.tab = tab
+        if tab == "saves":
+            self.load_saves()  # pick up saves made elsewhere and the current account
+        return True
 
     def line_input(self, prompt):
         """Read a line on the bottom row. Returns the text, or None if Esc was pressed."""
@@ -698,8 +783,8 @@ class TUI:
                 for kind, text in self.live.take_events():
                     self.toast(text, kind)
                 state = (self.live.version, self.tab, self.scroll[self.tab], self.msg if time.time() < self.msg_until else "",
-                         self.ask, self.history_loading, id(self.history), id(self.saves), self.con.dims(),
-                         tuple(sorted((k, str(v)) for k, v in self.prefs.items())), self.hotkey.error,
+                         id(self.dialog), self.dialog_v, self.busy, tuple(self.sel.values()), id(self.saves),
+                         self.con.dims(), tuple(sorted((k, str(v)) for k, v in self.prefs.items())), self.hotkey.error,
                          self.update_state, round(self.update_pct, 2), id(self.update))
                 if state != seen:
                     seen = state
@@ -721,16 +806,6 @@ class TUI:
             print(f"{self.update_msg} Starting it...")
             if not updater.restart():
                 print("Open valset again to use the new version.")
-
-
-def ago(ms):
-    if not ms:
-        return ""
-    m = round((time.time() * 1000 - ms) / 60000)
-    if m < 60:
-        return f"{m} min ago"
-    h = round(m / 60)
-    return f"{h} h ago" if h < 24 else f"{round(h / 24)} d ago"
 
 
 def run():

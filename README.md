@@ -6,7 +6,6 @@ A live VALORANT match tracker plus a settings saver, in one small app. You only 
 
 - **Live match:** rank, RR, peak rank, win rate, K/D, HS%, level, parties (duo / trio / stacks) and skins for all ten players. It fills in by itself when you hit agent select.
 - **Dodge:** a button in agent select, plus a hotkey that works from inside the game.
-- **My matches:** your recent games with K/D/A, ACS, HS% and RR gained or lost.
 - **Settings saves:** save and load your settings per Riot account, without opening, closing and reopening the game.
 - **Updates itself** from this repo's releases. It asks before installing.
 
@@ -33,14 +32,17 @@ Windows SmartScreen may warn you because the exe isn't signed. Click **More info
 
 valset runs full-screen in its terminal window. Drag it onto your second monitor; the board also fits narrow (portrait) windows.
 
+There are three screens: **1 Live match**, **2 Saves** and **3 Options** (or press `Tab` / `←` `→`). Saves and Options are lists: move with `↑` `↓` and press **Enter**. The bottom line always shows the keys you can use right now.
+
 | Key | Does |
 | --- | --- |
-| `1` `2` `3` `4` | Live match · My matches · Saves · Options |
-| `↑` `↓` `PgUp` `PgDn` | Scroll |
+| `1` `2` `3` | Live match · Saves · Options |
+| `↑` `↓` | Pick a row (Saves, Options) or scroll the board |
+| `Enter` | Save, load or change the highlighted row |
 | `D` | Dodge (agent select only, asks Y to confirm) |
-| `R` | Refresh your matches |
-| `S` `L` `U` `X` | Save · load · undo · delete settings (on the Saves screen) |
-| `U` | Check for / install an update (on the Options screen) |
+| `Del` | Delete the highlighted save (asks Y to confirm) |
+| `U` | Undo the last load (Saves screen) |
+| `Esc` | Cancel a question |
 | `Q` | Quit |
 
 Text size is the terminal's own: **Ctrl + mouse wheel**.
@@ -55,25 +57,29 @@ The only stack it can't see is one queuing together for the first time in a whil
 
 ### Dodging
 
-In agent select, click **Dodge match** and confirm, or press the hotkey (default **Ctrl+Shift+D**) **twice within 3 seconds**. The first press beeps, so one slip can't dodge you. You can change the hotkey or turn it off in Options.
+In agent select, press **D** and then **Y**, or press the hotkey (default **Ctrl+Shift+D**) **twice within 3 seconds**. The first press beeps, so one slip can't dodge you. You can change the hotkey or turn it off in Options.
 
 Dodging gets Riot's normal penalty: **you lose RR in competitive and get a queue cooldown**, the same as quitting agent select any other way.
 
 ### Updates
 
-valset checks this repo's [releases](https://github.com/yksaionara/valset/releases) when it starts (at most every 6 hours, one small request to GitHub). When a newer one is out, the top bar shows **⬆ vX out**. Go to **Options** (`4`) and press **U**:
+valset checks this repo's [releases](https://github.com/yksaionara/valset/releases) when it starts (at most every 6 hours, one small request to GitHub). When a newer one is out, the top bar shows **⬆ vX out**. Go to **Options** (`3`), pick **Install update** and press **Enter**:
 
 - **valset.exe** downloads the new `valset.exe`, checks it against the SHA-256 checksum GitHub lists for it, swaps it in and restarts in the same window. Your saves and options are untouched. If anything fails, the old exe stays as it was.
 - **Python source** replaces the `.py` files and `valset.bat`. Close valset and open it again to use them.
 - **A git clone** is never overwritten; it tells you to `git pull`.
 
-Nothing installs until you press U. Turn the start-up check off with **A** in Options. From the command line: `valset update` (or `valset update --check` to only look).
+Nothing installs until you say so. Turn the start-up check off with **Check for updates** in Options. From the command line: `valset update` (or `valset update --check` to only look).
 
 If you have v0.1.0-beta, download the new exe by hand once. That version didn't have the updater yet.
 
 ### Settings
 
-**Copy settings from one account to another:** log in to account 1 and pick **Save**. Switch to account 2 and pick **Load**. Close VALORANT before you load, and your settings are there the next time you launch it.
+**Save:** go to **Saves** (`2`), press **Enter** on **+ Save my current settings**, type a name (or just press Enter).
+
+**Load:** close VALORANT, highlight a save and press **Enter**, then **Enter** again to load everything, or **P** to tick just the parts you want (sens, keybinds, crosshair, audio, general, video). Your current settings are backed up first, and **U** undoes the load.
+
+**Copy settings from one account to another:** save on account 1, switch to account 2 in the Riot Client, and load it. Saves from other accounts are listed under **Other accounts**.
 
 ## Commands
 
@@ -81,7 +87,6 @@ Use `valset.exe` instead of `python valset.py` if you have the exe.
 
 ```
 python valset.py live          # live tracker in the terminal
-python valset.py history 20    # your last 20 matches
 python valset.py menu          # the old terminal menu
 python valset.py update        # install a newer release from GitHub (--check to only look)
 python valset.py --version

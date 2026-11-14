@@ -17,8 +17,9 @@ from valset import (APP_DIR, CATEGORIES, CAT_NAMES, AppError, all_snapshots, app
                     game_running, get_session, resolve, save_snapshot, undo_backups)
 
 PREFS_FILE = APP_DIR / "valset-window.json"
+PREFS_VERSION = 2  # 2: compact became the default
 DEFAULT_PREFS = {
-    "compact": False, "show_skins": True, "auto_update": True,
+    "v": PREFS_VERSION, "compact": True, "show_skins": True, "auto_update": True,
     "hotkey_enabled": True, "hotkey": {"ctrl": True, "alt": False, "shift": True, "vk": 0x44, "label": "Ctrl+Shift+D"},
 }
 ARM_SECONDS = 3  # second hotkey press must come within this
@@ -26,9 +27,12 @@ ARM_SECONDS = 3  # second hotkey press must come within this
 
 def load_prefs():
     try:
-        return {**DEFAULT_PREFS, **json.loads(PREFS_FILE.read_text(encoding="utf-8"))}
+        saved = json.loads(PREFS_FILE.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return dict(DEFAULT_PREFS)
+    if saved.get("v", 1) < 2:  # older copies saved compact=False as the old default
+        saved["compact"] = True
+    return {**DEFAULT_PREFS, **saved, "v": PREFS_VERSION}
 
 
 def save_prefs(p):
