@@ -58,7 +58,7 @@ VAL_CONFIG = LOCALAPPDATA / "VALORANT" / "Saved" / "Config"
 VAL_LOG = LOCALAPPDATA / "VALORANT" / "Saved" / "Logs" / "ShooterGame.log"
 GAME_EXE = "VALORANT-Win64-Shipping.exe"
 
-VERSION = "0.2.0-beta"  # must match the GitHub release tag (v0.2.0-beta); the updater compares against it
+VERSION = "0.2.1-beta"  # the release tag must be "v" + this; the updater compares against it
 SETTINGS_TYPE = "Ares.PlayerSettings"
 USER_AGENT = f"valset/{VERSION}"  # honest app name; Python's default UA is blocked by Cloudflare
 # base64 of {"platformType":"PC","platformOS":"Windows",...} exactly as the game sends it
@@ -937,11 +937,6 @@ def _live(a):
     tracker.cmd_live(a)
 
 
-def _history(a):
-    import tracker
-    tracker.cmd_history(a)
-
-
 def _update(a):
     import updater
     return updater.cmd_update(a)
@@ -1006,10 +1001,6 @@ def build_parser():
     sp.add_argument("--no-skins", action="store_true", help="hide the skin line under each player")
     sp.add_argument("--interval", type=float, default=5, help="seconds between refreshes")
     sp.set_defaults(fn=_live)
-
-    sp = sub.add_parser("history", help="your recent matches with K/D/A, ACS, HS%% and RR")
-    sp.add_argument("count", nargs="?", type=int, default=10, help="how many matches (max 20)")
-    sp.set_defaults(fn=_history)
 
     sp = sub.add_parser("update", help="check GitHub for a newer valset and install it")
     sp.add_argument("--check", action="store_true", help="only say whether there's an update")
@@ -1288,7 +1279,6 @@ def menu(parser):
         ("Undo the last load", menu_undo, True),
         ("Delete a save", menu_delete, False),
         ("Live match tracker", lambda s: _live(None), True),
-        ("My match history", lambda s: _history(None), True),
         ("Check for updates", lambda s: _update(argparse.Namespace(check=False, yes=False)), False),
         ("Advanced (type commands)", None, False),
     ]

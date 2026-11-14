@@ -11,7 +11,6 @@ import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
 
 from valset import (LOCALAPPDATA, AppError, HttpError, Session, _pp_headers, clear, dim, get_session, head,
                     http, info, paint, read_lockfile, warn)
@@ -257,9 +256,6 @@ class Api:
         self._details[mid] = d
         return d
 
-    def rr_changes(self, puuid):
-        r = self.call("GET", f"{self.pd}/mmr/v1/players/{puuid}/competitiveupdates?startIndex=0&endIndex=20") or {}
-        return {m["MatchID"]: m.get("RankedRatingEarned") for m in r.get("Matches") or []}
 
 
 def compact_match(d):
@@ -496,32 +492,6 @@ def board(api: Api, snap, cache):
             "can_dodge": snap["phase"] == "agent select", "teams": teams}
 
 
-def history_data(api: Api, n=10):
-    s = api.s
-    mids = api.history(s.puuid, max(1, min(n, 20)))
-    rr = api.rr_changes(s.puuid)
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        lines = list(pool.map(lambda m: player_line(api.details(m) or {}, s.puuid), mids))
-    m = api.mmr(s.puuid)
-    matches = []
-    for mid, ln in zip(mids, lines):
-        if not ln:
-            continue
-        a, b = (ln["score"].split("-") + ["", ""])[:2]
-        matches.append({**ln, "id": mid,
-                        "result": "win" if ln["won"] else "draw" if a == b and ln["queue"] != "deathmatch" else "loss",
-                        "queue_name": QUEUE_NAMES.get(ln["queue"], ln["queue"]),
-                        "rr": rr.get(mid) if ln["queue"] == "competitive" else None,
-                        "map_image": map_images().get(next((k for k, v in maps().items() if v == ln["map"]), None)),
-                        "agent_icon": next((agent_icons().get(k) for k, v in agents().items() if v == ln["agent"]), None),
-                        "acs": ln["acs"] if ln["queue"] != "deathmatch" else None,
-                        "score": ln["score"] if ln["queue"] != "deathmatch" else None})
-    return {"account": s.display,
-            "rank": _rank(m["tier"], m["rr"]) if m else None, "peak": _rank(m["peak"]) if m else None,
-            "wr": round(100 * m["wins"] / m["games"]) if m and m["games"] else None,
-            "games": m["games"] if m else 0, "matches": matches}
-
-
 # --------------------------------------------------------------------------- live screen
 
 RANK_COLORS = [(3, "90"), (6, "33"), (9, "37"), (12, "93"), (15, "96"), (18, "94"), (21, "95"),
@@ -655,52 +625,3 @@ def cmd_live(a):
             return  # not a real console: print once and stop
         if wait(interval):
             return
-
-
-# --------------------------------------------------------------------------- your match history
-
-def cmd_history(a):
-    s = get_session()
-    api = Api(s)
-    n = max(1, min(int(getattr(a, "count", None) or 10), 20))
-    mids = api.history(s.puuid, n)
-    if not mids:
-        raise AppError("Riot didn't return any recent matches for this account.")
-    rr = api.rr_changes(s.puuid)
-    with ThreadPoolExecutor(max_workers=5) as pool:
-        lines = list(pool.map(lambda m: player_line(api.details(m) or {}, s.puuid), mids))
-
-    m = api.mmr(s.puuid)
-    print()
-    head(f"  {s.display}")
-    if m:
-        wr = f"{round(100 * m['wins'] / m['games'])}% WR ({m['games']} games)" if m["games"] else "no games this act"
-        rank = f"{tier_name(m['tier'])} {m['rr']}rr" if m["tier"] > 2 else "Unranked"
-        print(f"  {paint(rank, rank_color(m['tier']))}   peak {paint(tier_name(m['peak']), rank_color(m['peak']))}   {wr}")
-    print()
-    print(dim(f"    {'WHEN':<12} {'MODE':<8} {'MAP':<10} {'AGENT':<10} {'RESULT':<8} {'K/D/A':<10} {'ACS':>4} {'HS':>4}  RR"))
-    tot = {"k": 0, "d": 0, "wins": 0, "games": 0}
-    for mid, ln in zip(mids, lines):
-        if not ln:
-            print(dim("    (couldn't load this match)"))
-            continue
-        when = datetime.fromtimestamp(ln["start"] / 1000).strftime("%b %d %H:%M") if ln["start"] else "?"
-        draw = not ln["won"] and ln["score"].split("-")[0] == ln["score"].split("-")[-1]
-        letter, col = ("W", "32") if ln["won"] else ("D", "33") if draw else ("L", "31")
-        res = paint(f"{letter} {ln['score'] if ln['queue'] != 'deathmatch' else '':<6}", col)
-        acs = str(ln["acs"]) if ln["queue"] != "deathmatch" else "-"
-        kda = f"{ln['k']}/{ln['d']}/{ln['a']}"
-        hs = f"{ln['hs']}%" if ln["hs"] is not None else "-"
-        change = rr.get(mid)
-        rr_txt = (paint(f"{change:+d}", "32" if change > 0 else "31" if change < 0 else "90")
-                  if isinstance(change, int) and ln["queue"] == "competitive" else "")
-        print(f"    {when:<12} {QUEUE_NAMES.get(ln['queue'], ln['queue']):<8} {ln['map']:<10} {ln['agent']:<10} "
-              f"{res} {kda:<10} {acs:>4} {hs:>4}  {rr_txt}")
-        tot["k"] += ln["k"]
-        tot["d"] += ln["d"]
-        tot["games"] += 1
-        tot["wins"] += 1 if ln["won"] else 0
-    if tot["games"]:
-        print()
-        print(f"  Last {tot['games']}: {tot['wins']}W {tot['games'] - tot['wins']}L · "
-              f"K/D {tot['k'] / max(tot['d'], 1):.2f}")
