@@ -2,3 +2,7 @@ profiles/
 __pycache__/
 *.pyc
 dist/
+valset-window.json
+build/
+.build-venv/
+*.spec
