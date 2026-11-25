@@ -4,9 +4,12 @@
 
 A live VALORANT match tracker plus a settings saver, in one small app. You only need the Riot Client open.
 
-- **Live match:** rank, RR, peak rank, win rate, K/D, HS%, level, parties (duo / trio / stacks) and skins for all ten players. It fills in by itself when you hit agent select.
+- **Live match:** rank, RR, peak rank, win rate, K/D, HS%, recent form, parties (duo / trio / stacks) and skins for all ten players. It fills in by itself when you hit agent select.
+- **Player hints:** win and loss streaks, possible smurfs, players off their main agent, and a rough team edge.
+- **Players you've met:** valset remembers who was in your matches. Tag someone *good* or *avoid*, write a note, and it shows up (with a warning for *avoid*) the next time you're in a game together.
+- **Your session:** tonight's wins, losses and RR, your rank progress, and a recap card after every match.
 - **Dodge:** a button in agent select, plus a hotkey that works from inside the game.
-- **Settings saves:** save and load your settings per Riot account, without opening, closing and reopening the game.
+- **Settings saves:** save and load your settings per Riot account, without opening, closing and reopening the game. Before a load it shows exactly what would change.
 - **Updates itself** from this repo's releases. It asks before installing.
 
 > **Beta.** It works, but it isn't perfect yet. valset backs up the account before every load, and **Undo the last load** puts it back.
@@ -30,22 +33,47 @@ Rather not install anything? Download **`valset.exe`** instead and put it in its
 
 Windows SmartScreen may warn you because the exe isn't signed. Click **More info**, then **Run anyway**. If you'd rather run from source, install [Python 3.10+](https://www.python.org/downloads/) and double-click `valset.bat`.
 
-valset runs full-screen in its terminal window. Drag it onto your second monitor; the board also fits narrow (portrait) windows.
+valset runs full-screen in its terminal window, made to sit on a second monitor: drag it there and leave it. The board also fits narrow (portrait) windows. It has its own dark theme; turn **Dark background** off in Options to use your terminal's colours.
 
-There are three screens: **1 Live match**, **2 Saves** and **3 Options** (or press `Tab` / `←` `→`). Saves and Options are lists: move with `↑` `↓` and press **Enter**. The bottom line always shows the keys you can use right now.
+There are four screens: **1 Live**, **2 Players**, **3 Saves** and **4 Options**. Everything works with the mouse: click a tab, click a row to pick it, click it again (or double-click) to open it, and scroll with the wheel. The bottom line always shows the keys you can use right now, and you can click those too.
 
 | Key | Does |
 | --- | --- |
-| `1` `2` `3` | Live match · Saves · Options |
-| `↑` `↓` | Pick a row (Saves, Options) or scroll the board |
-| `Enter` | Save, load or change the highlighted row |
+| `1` `2` `3` `4` / `Tab` | Live · Players · Saves · Options |
+| `↑` `↓` | Pick a player (Live) or a row (other screens) |
+| `Enter` | Save, load, change or open the highlighted row |
+| `N` | Write a note on the highlighted player |
+| `T` | Tag the highlighted player: good → avoid → none |
 | `D` | Dodge (agent select only, asks Y to confirm) |
-| `Del` | Delete the highlighted save (asks Y to confirm) |
+| `Del` | Delete the highlighted save, or clear a player's note and tag |
 | `U` | Undo the last load (Saves screen) |
-| `Esc` | Cancel a question |
+| `/` | Search players (Players screen) |
+| `R` | Refresh your session (Live, between matches) |
+| `Esc` | Cancel a question, close the player details |
 | `Q` | Quit |
 
-Text size is the terminal's own: **Ctrl + mouse wheel**.
+Text size is the terminal's own: **Ctrl + mouse wheel**. Turn **Mouse** off in Options if you'd rather select text with the mouse.
+
+### Between matches: your session
+
+While you're in the menus, the Live screen shows your rank with a bar to the next one, a recap of your last match (result, score, RR, K/D/A, ACS, HS%, where you placed, and the best player on each team) and tonight's games. "Tonight" is your run of games with no break longer than 2½ hours. The top bar keeps tonight's score (`Tonight 3W 1L +23 RR`) on every screen.
+
+When agent select starts, valset dings and flashes its taskbar button so you notice from the other monitor. Turn that off with **Match alert** in Options.
+
+### Player details, notes and tags
+
+Click a player (or move to them with `↑` `↓`) to open their details: their last few competitive games, every time you've played with or against them, and your note. Press **N** to write a note and **T** to tag them *good* or *avoid*. The next time they're in your match, the tag and note show on their row, and an *avoid* tag also pops up a warning, in agent select too, so you still have time to dodge.
+
+**Players** (`2`) lists everyone you've met, tagged players first. Your notes stay on this PC in `profiles\players.json`, next to your saves. Players who hide their name show as their agent; valset never shows or stores the name they hid.
+
+The **NOTES** column also shows:
+
+- **`met 2×`**: you've played with or against them before.
+- **`▲3W streak`** / **`▼3L streak`**: they won or lost all of their last 3 competitive games.
+- **`smurf?`**: a low account level for their rank, or a low level with a very high K/D and HS%. It's a hint, not proof.
+- **`main Jett`**: they usually play another agent.
+
+**Team edge** (in game) is a rough guess at your team's chances from rank, K/D and win rate. Treat it as a vibe check, not a prediction.
 
 valset is built to stay out of your game's way. It's text only (no window toolkit, no browser), so it uses **about 25 MB of memory and well under 1% of one CPU core, and no GPU**. In the menus it asks the Riot Client on your PC whether a match has started, so it doesn't use the internet at all until agent select. Once a match has loaded it only checks now and then for the match ending. Connections to Riot are kept open and reused, and finished matches are saved on disk, so players you've already seen load instantly. Run `valset menu` for the simple numbered menu.
 
@@ -63,7 +91,7 @@ Dodging gets Riot's normal penalty: **you lose RR in competitive and get a queue
 
 ### Updates
 
-valset checks this repo's [releases](https://github.com/yksaionara/valset/releases) when it starts (at most every 6 hours, one small request to GitHub). When a newer one is out, the top bar shows **⬆ vX out**. Go to **Options** (`3`), pick **Install update** and press **Enter**:
+valset checks this repo's [releases](https://github.com/yksaionara/valset/releases) when it starts (at most every 6 hours, one small request to GitHub). When a newer one is out, the top bar shows **↑ vX out**. Go to **Options** (`4`), pick **Install update** and press **Enter**:
 
 - **valset.exe** downloads the new `valset.exe`, checks it against the SHA-256 checksum GitHub lists for it, swaps it in and restarts in the same window. Your saves and options are untouched. If anything fails, the old exe stays as it was.
 - **Python source** replaces the `.py` files and `valset.bat`. Close valset and open it again to use them.
@@ -75,9 +103,9 @@ If you have v0.1.0-beta, download the new exe by hand once. That version didn't 
 
 ### Settings
 
-**Save:** go to **Saves** (`2`), press **Enter** on **+ Save my current settings**, type a name (or just press Enter).
+**Save:** go to **Saves** (`3`), press **Enter** on **+ Save my current settings**, type a name (or just press Enter).
 
-**Load:** close VALORANT, highlight a save and press **Enter**, then **Enter** again to load everything, or **P** to tick just the parts you want (sens, keybinds, crosshair, audio, general, video). Your current settings are backed up first, and **U** undoes the load.
+**Load:** close VALORANT, highlight a save and press **Enter**. valset shows what would change (for example `Sens 0.35 → 0.42 · Crosshair 6 changes · Audio same`). Press **Enter** again to load everything, or **P** to pick the parts (it starts with just the parts that differ). Your current settings are backed up first, and **U** undoes the load.
 
 **Copy settings from one account to another:** save on account 1, switch to account 2 in the Riot Client, and load it. Saves from other accounts are listed under **Other accounts**.
 
