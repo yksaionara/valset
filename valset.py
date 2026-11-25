@@ -58,7 +58,7 @@ VAL_CONFIG = LOCALAPPDATA / "VALORANT" / "Saved" / "Config"
 VAL_LOG = LOCALAPPDATA / "VALORANT" / "Saved" / "Logs" / "ShooterGame.log"
 GAME_EXE = "VALORANT-Win64-Shipping.exe"
 
-VERSION = "0.2.1-beta"  # the release tag must be "v" + this; the updater compares against it
+VERSION = "0.3.0-beta"  # the release tag must be "v" + this; the updater compares against it
 SETTINGS_TYPE = "Ares.PlayerSettings"
 USER_AGENT = f"valset/{VERSION}"  # honest app name; Python's default UA is blocked by Cloudflare
 # base64 of {"platformType":"PC","platformOS":"Windows",...} exactly as the game sends it

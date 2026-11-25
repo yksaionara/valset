@@ -7,6 +7,7 @@ Riot Client's login), plus the public valorant-api.com tables for names.
 from __future__ import annotations
 import base64
 import json
+import math
 import os
 import sys
 import time
@@ -225,9 +226,19 @@ class Api:
                 "games": cur.get("NumberOfGames") or 0}
 
     def history(self, puuid, n, queue=None):
+        return [h["MatchID"] for h in self.history_full(puuid, n, queue)]
+
+    def history_full(self, puuid, n, queue=None):
+        """[{MatchID, GameStartTime, QueueID}], newest first."""
         q = f"&queue={queue}" if queue else ""
         r = self.call("GET", f"{self.pd}/match-history/v1/history/{puuid}?startIndex=0&endIndex={n}{q}") or {}
-        return [h["MatchID"] for h in r.get("History") or []]
+        return r.get("History") or []
+
+    def rr_updates(self, puuid, n=15):
+        """match id -> RR earned, for your last few competitive games."""
+        r = self.call("GET", f"{self.pd}/mmr/v1/players/{puuid}/competitiveupdates"
+                             f"?startIndex=0&endIndex={n}&queue=competitive") or {}
+        return {m["MatchID"]: m.get("RankedRatingEarned") for m in r.get("Matches") or [] if m.get("MatchID")}
 
     def details(self, mid):
         """A finished match, boiled down. Finished matches never change, so they're kept on
@@ -309,7 +320,7 @@ def profile(api: Api, puuid):
 
 def recent_stats(api: Api, puuid):
     """K/D, HS%, W/L and who they queued with, from a player's last few competitive games."""
-    out = {"kd": None, "hs": None, "form": "", "party_mates": set(), "stats_done": True}
+    out = {"kd": None, "hs": None, "form": "", "party_mates": set(), "stats_done": True, "recent": [], "main": None}
     k = dth = hs_sum = hs_n = 0
     for mid in api.history(puuid, RECENT_MATCHES, "competitive"):
         d = api.details(mid)
@@ -322,6 +333,7 @@ def recent_stats(api: Api, puuid):
             hs_sum += line["hs"]
             hs_n += 1
         out["form"] += "W" if line["won"] else "L"
+        out["recent"].append({x: line[x] for x in ("agent", "map", "won", "k", "d", "a", "acs", "score")})
         # match details list every player's party, so this is who they actually queued with
         party = next((x.get("partyId") for x in d["players"] if x.get("subject") == puuid), None)
         if party:
@@ -330,6 +342,10 @@ def recent_stats(api: Api, puuid):
         out["kd"] = round(k / max(dth, 1), 2)
     if hs_n:
         out["hs"] = round(hs_sum / hs_n)
+    played = [r["agent"] for r in out["recent"] if r["agent"] != "?"]
+    top = max(set(played), key=played.count) if played else None
+    if top and played.count(top) >= 2:
+        out["main"] = top
     return out
 
 
@@ -442,8 +458,55 @@ def skin_list(items):
     return out
 
 
-def board(api: Api, snap, cache):
-    """Everything the window shows for a match, as plain JSON-able data."""
+def flags(row, prof):
+    """Short hints for one player: streaks, smurf look, off their main agent."""
+    out = []
+    form = prof.get("form") or ""
+    if len(form) >= 3 and set(form) == {"W"}:
+        out.append(("hot", f"{len(form)}W streak"))
+    elif len(form) >= 3 and set(form) == {"L"}:
+        out.append(("cold", f"{len(form)}L streak"))
+    tier = (row["rank"] or {}).get("tier") or 0
+    lvl, kd, hs = row["level"], row["kd"], row["hs"]
+    if lvl and ((lvl <= 50 and tier >= 18) or (lvl <= 60 and (kd or 0) >= 1.5 and (hs or 0) >= 30)):
+        out.append(("smurf", "smurf?"))
+    main = prof.get("main")
+    if main and row["agent"] not in ("Picking...", main):
+        out.append(("main", f"main {main}"))
+    return out
+
+
+def player_score(r):
+    """Rough strength of one player for the team edge: rank first, then K/D and win rate."""
+    tier = (r["rank"] or {}).get("tier") or 0
+    if tier <= 2:  # unranked this act: go by their peak, a bit lower
+        tier = max(0, ((r["peak"] or {}).get("tier") or 0) - 2) or None
+    if tier is None:
+        return None
+    score = tier
+    if r["kd"] is not None:
+        score += max(-2.0, min(2.0, (r["kd"] - 1) * 3))
+    if r["wr"] is not None and (r["games"] or 0) >= 5:
+        score += max(-1.5, min(1.5, (r["wr"] - 50) / 10))
+    return score
+
+
+def team_edge(teams):
+    """Your team's rough chance in percent, or None until enough players have loaded."""
+    if len(teams) != 2:
+        return None
+    avgs = []
+    for t in teams:
+        scores = [x for x in (player_score(r) for r in t["players"]) if x is not None]
+        if len(scores) < 3:
+            return None
+        avgs.append(sum(scores) / len(scores))
+    return round(100 / (1 + math.exp(-0.45 * (avgs[0] - avgs[1]))))
+
+
+def board(api: Api, snap, cache, notes=None):
+    """Everything the window shows for a match, as plain JSON-able data. `notes(puuid)` gives
+    what you remember about a player (people.summary)."""
     me = api.s.puuid
     players, parties = snap["players"], snap["parties"]
     groups = find_groups(players, parties, cache)
@@ -461,7 +524,7 @@ def board(api: Api, snap, cache):
             hidden = p["incognito"] and pu != me
             name = (agent or "Hidden") if hidden else snap["names"].get(pu, "Unknown")
             g = groups.get(pu)
-            rows.append({
+            row = {
                 "puuid": pu, "me": pu == me, "name": name, "hidden": hidden,
                 "agent": agent or "Picking...", "agent_icon": agent_icons().get(p["agent"]) if agent else None,
                 "level": p["level"], "loading": "mmr" not in prof, "stats_loading": not prof.get("stats_done"),
@@ -470,10 +533,14 @@ def board(api: Api, snap, cache):
                 "wr": round(100 * m["wins"] / m["games"]) if m and m["games"] else None,
                 "games": m["games"] if m else None,
                 "kd": prof.get("kd"), "hs": prof.get("hs"), "form": prof.get("form", ""),
+                "recent": prof.get("recent") or [], "main": prof.get("main"),
                 "party": {"n": g[0] + 1, "size": g[1], "label": PARTY_WORD.get(g[1], "party")} if g else None,
                 "solo": pu in parties and not g,
                 "skins": skin_list(snap["loadouts"][pu]) if snap["loadouts"].get(pu) else [],
-            })
+                "memo": notes(pu) if notes and pu != me else None,
+            }
+            row["flags"] = flags(row, prof) if pu != me else []
+            rows.append(row)
         rows.sort(key=lambda r: (r["party"] is None, (r["party"] or {}).get("n", 0),
                                  -((r["rank"] or {}).get("tier") or 0)))
         for r in rows:  # number parties in the order they appear: your team first, top to bottom
@@ -489,7 +556,62 @@ def board(api: Api, snap, cache):
     return {"phase": snap["phase"], "mid": snap["mid"], "map": snap["map"],
             "map_image": map_images().get(api.map_id), "queue": snap["queue"],
             "queue_name": QUEUE_NAMES.get(snap["queue"], snap["queue"] or "Custom"),
-            "can_dodge": snap["phase"] == "agent select", "teams": teams}
+            "can_dodge": snap["phase"] == "agent select", "teams": teams, "edge": team_edge(teams)}
+
+
+# --------------------------------------------------------------------------- your session
+
+SESSION_GAP_H = 2.5  # games further apart than this start a new session
+NO_RESULT_QUEUES = ("deathmatch",)  # free-for-all: no team win or loss
+
+
+def session(api: Api, names=None):
+    """Your games tonight (back to back, no gap over SESSION_GAP_H hours), the RR they gave,
+    and a recap of the newest one. `names`: puuid -> name for players you were allowed to see."""
+    me = api.s.puuid
+    hist = api.history_full(me, 15)
+    rr = api.rr_updates(me) if hist else {}
+    games, prev = [], time.time() * 1000
+    for h in hist:
+        start = h.get("GameStartTime") or 0
+        # the newest game also gets an hour for its own length
+        if prev - start > (SESSION_GAP_H + (0 if games else 1)) * 3600 * 1000:
+            break
+        prev = start
+        d = api.details(h["MatchID"])
+        line = player_line(d, me) if d else None
+        if line:
+            games.append({**line, "mid": h["MatchID"], "rr": rr.get(h["MatchID"]),
+                          "counts": line["queue"] not in NO_RESULT_QUEUES})
+    m = api.mmr(me) or {}
+    counted = [g for g in games if g["counts"]]
+    with_rr = [g["rr"] for g in games if g["rr"] is not None]
+    return {"games": games, "w": sum(1 for g in counted if g["won"]), "l": sum(1 for g in counted if not g["won"]),
+            "rr": sum(with_rr) if with_rr else None,
+            "kd": round(sum(g["k"] for g in games) / max(1, sum(g["d"] for g in games)), 2) if games else None,
+            "rank": _rank(m["tier"], m["rr"]) if m else None,
+            "newest": hist[0]["MatchID"] if hist else None,
+            "last": recap(api, hist[0]["MatchID"], rr.get(hist[0]["MatchID"]), names or {}) if hist else None}
+
+
+def recap(api: Api, mid, rr, names):
+    """The card for one finished match: your line, the score, where you placed, and the top
+    player on each side (by name only if you could see their name in the match)."""
+    d = api.details(mid)
+    me = api.s.puuid
+    line = player_line(d, me) if d else None
+    if not line:
+        return None
+    mine = next((p.get("teamId") for p in d["players"] if p.get("subject") == me), None)
+    lines = [(p, player_line(d, p["subject"])) for p in d["players"]]
+    tops = {}
+    for p, pl in lines:
+        side = "mine" if p.get("teamId") == mine else "theirs"
+        if pl and (side not in tops or pl["acs"] > tops[side]["acs"]):
+            tops[side] = {**pl, "you": p["subject"] == me, "name": names.get(p["subject"])}
+    order = sorted((pl["acs"] for _, pl in lines if pl), reverse=True)
+    return {**line, "mid": mid, "rr": rr, "tops": tops, "place": order.index(line["acs"]) + 1,
+            "of": len(order), "start": line["start"]}
 
 
 # --------------------------------------------------------------------------- live screen
