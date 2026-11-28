@@ -58,7 +58,6 @@ Text size is the terminal's own: **Ctrl + mouse wheel**. Turn **Mouse** off in O
 
 While you're in the menus, the Live screen shows your rank with a bar to the next one, a recap of your last match (result, score, RR, K/D/A, ACS, HS%, where you placed, and the best player on each team) and tonight's games. "Tonight" is your run of games with no break longer than 2½ hours. The top bar keeps tonight's score (`Tonight 3W 1L +23 RR`) on every screen.
 
-When agent select starts, valset dings and flashes its taskbar button so you notice from the other monitor. Turn that off with **Match alert** in Options.
 
 ### Player details, notes and tags
 

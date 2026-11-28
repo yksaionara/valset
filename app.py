@@ -23,7 +23,7 @@ PREFS_VERSION = 2  # 2: compact became the default
 DEFAULT_PREFS = {
     "v": PREFS_VERSION, "compact": True, "show_skins": True, "auto_update": True,
     "hotkey_enabled": True, "hotkey": {"ctrl": True, "alt": False, "shift": True, "vk": 0x44, "label": "Ctrl+Shift+D"},
-    "alert": True, "theme_bg": True, "mouse": True,
+    "theme_bg": True, "mouse": True,
 }
 ARM_SECONDS = 3  # second hotkey press must come within this
 SESSION_RETRY = 20  # seconds between looks for a just-finished match in your history
@@ -81,7 +81,7 @@ class Live:
 
     def _new_match(self, mid):
         self.mid, self.cache, self.queued = mid, {}, set()
-        self.names, self.loadouts, self.loadout_phase = {}, {}, None
+        self.names, self.loadouts, self.loadout_phase, self.loadout_at = {}, {}, None, 0
         self.parties, self.parties_at = {}, 0
         self.my_party = None  # your own party, fetched once per match
         self.players = []
@@ -192,8 +192,17 @@ class Live:
             got = api.names(missing)
             for pu in missing:
                 self.names[pu] = got.get(pu, "Unknown")
-        if self.loadout_phase != phase or (len(self.loadouts) < len(puuids)):
-            self.loadouts = api.loadouts(phase, mid, players)
+        # Riot can hand back empty loadouts early in agent select, so ask again (every 10s at most)
+        # until everyone's skins are in
+        have = sum(1 for pu in puuids if self.loadouts.get(pu))
+        if self.loadout_phase != phase or (have < len(puuids) and time.time() - self.loadout_at > 10):
+            self.loadout_at = time.time()
+            try:
+                got = api.loadouts(phase, mid, players)
+            except AppError:
+                got = {}
+            if self.loadout_phase != phase or len([v for v in got.values() if v]) >= have:
+                self.loadouts = got
             self.loadout_phase = phase
         if self.my_party is None:
             try:
@@ -378,23 +387,6 @@ def beep(kind):
     try:
         import winsound
         winsound.MessageBeep(winsound.MB_ICONEXCLAMATION if kind == 0 else winsound.MB_OK)
-    except Exception:
-        pass
-
-
-def attention():
-    """Flash valset's taskbar button and ding, for 'match found' while you're tabbed out."""
-    beep(0)
-    if os.name != "nt":
-        return
-    try:
-        class FLASHWINFO(ctypes.Structure):
-            _fields_ = [("cbSize", wintypes.UINT), ("hwnd", wintypes.HWND), ("dwFlags", wintypes.DWORD),
-                        ("uCount", wintypes.UINT), ("dwTimeout", wintypes.DWORD)]
-        hwnd = ctypes.windll.kernel32.GetConsoleWindow()
-        if hwnd:
-            fi = FLASHWINFO(ctypes.sizeof(FLASHWINFO), hwnd, 0x3 | 0xC, 0, 0)  # all, until focused
-            ctypes.windll.user32.FlashWindowEx(ctypes.byref(fi))
     except Exception:
         pass
 
