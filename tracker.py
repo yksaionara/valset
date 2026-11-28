@@ -21,8 +21,7 @@ PARTY_COLORS = ["35", "36", "33", "34", "32", "91", "96", "93"]
 PARTY_WORD = {2: "duo", 3: "trio", 4: "4-stack", 5: "5-stack"}
 SKIN_SOCKET = "bcef87d6-209b-46c6-8b19-fbe40bd95abc"
 SHOWN_WEAPONS = [("Vandal", "9c82e19d-4575-0200-1a81-3eacf00cf872"),
-                 ("Phantom", "ee8e8d15-496b-07ac-e5f6-8fae5d4c7b1a"),
-                 ("Knife", "2f59173c-4bed-b6c3-2191-dea9b58be9c7")]
+                 ("Phantom", "ee8e8d15-496b-07ac-e5f6-8fae5d4c7b1a")]
 QUEUE_NAMES = {"competitive": "Comp", "unrated": "Unrated", "swiftplay": "Swift", "spikerush": "Spike",
                "deathmatch": "DM", "hurm": "TDM", "ggteam": "Escalate", "premier": "Premier",
                "": "Custom"}

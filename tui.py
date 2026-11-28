@@ -729,7 +729,7 @@ class TUI:
                        "  " + paint(f"{e}%", C["ally"], True) + paint(" vs ", C["muted"]) +
                        paint(f"{100 - e}%", C["enemy"], True) +
                        paint("   a rough guess from rank, K/D and win rate" if not narrow else "", C["dim"]))
-        skins = self.prefs.get("show_skins") and not self.prefs.get("compact")
+        skins = self.prefs.get("show_skins", True)
         name_w = max(14, min(26, w - 100))
         players = self.flat_players()
         if self.pick and self.pick not in [p["puuid"] for p in players]:
@@ -1217,10 +1217,8 @@ class TUI:
         return [
             ("BOARD", None, None, None),
             ("Compact board", p.get("compact"), "one line per player", toggle("compact")),
-            ("Show skins", p.get("show_skins"), "Vandal, Phantom and knife under each player (when compact is off)",
+            ("Show skins", p.get("show_skins"), "Vandal and Phantom skins under each player",
              toggle("show_skins")),
-            ("Match alert", p.get("alert", True), "ding and flash the taskbar when agent select starts",
-             toggle("alert", True)),
             ("LOOK AND FEEL", None, None, None),
             ("Dark background", p.get("theme_bg", True), "valset's own dark theme (off = your terminal's colours)",
              toggle("theme_bg", True)),
@@ -1370,10 +1368,6 @@ class TUI:
     def on_events(self):
         for kind, text in self.live.take_events():
             self.toast(text, kind)
-            if kind == "match" and self.prefs.get("alert", True):
-                threading.Thread(target=app.attention, daemon=True).start()
-            elif kind == "avoid":
-                threading.Thread(target=app.beep, args=(0,), daemon=True).start()
 
     def window_title(self):
         b = self.live.board
